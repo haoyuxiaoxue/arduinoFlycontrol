@@ -1,18 +1,16 @@
 //2019-4-9 zhaohaoyu
 //正在完善的arduino fly control
-#include <timer.h>
 // SBUS reading 4 channel signal and filting the signal cost 10ms
-#include <sbus.h>
+#include <SBUS.h>
 //MPU6050
 #include "Wire.h"
 #include "I2Cdev.h"
 #include "MPU6050.h"
 
-Timer<1, micros> timer;
-// used pins
-#define SBUS_PIN 62
-SBUS sbus;
-int receiver_input_channel[4], receiver_input_channel_filted[4];
+SBUS sbus(Serial3);
+bool failSafe;
+bool lostFrame;
+int receiver_input_channel[16], receiver_input_channel_filted[4];
 
 // timer variable
 unsigned long timer_channel_1, timer_channel_2, timer_channel_3, timer_channel_4, esc_timer, esc_loop_timer;
@@ -36,6 +34,8 @@ int16_t ax, ay, az, gx, gy, gz;             //加速度计陀螺仪原始数据
 float aax = 0, aay = 0, aaz = 0, agx = 0, agy = 0, agz = 0; //角度变量
 long axo = 0, ayo = 0, azo = 0;             //加速度计偏移量
 long gxo = 0, gyo = 0, gzo = 0;             //陀螺仪偏移量
+float agxb = 0, agyb = 0, agzb = 0;
+float aaxb = 0, aayb = 0;
 
 float pi = 3.1415926;
 float AcceRatio = 16384.0;                  //加速度计比例系数
@@ -53,9 +53,9 @@ float Pz = 1, Rz, Kz, Sz, Vz, Qz;           //z轴卡尔曼变量
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //PID gain and limit settings
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-float pid_p_gain_roll = 0;               //Gain setting for the roll P-controller (1.3)
+float pid_p_gain_roll = 2;               //Gain setting for the roll P-controller (1.3)
 float pid_i_gain_roll = 0;                //Gain setting for the roll I-controller (0.3)
-float pid_d_gain_roll = 40;                //Gain setting for the roll D-controller (15)
+float pid_d_gain_roll = 0;                //Gain setting for the roll D-controller (15)
 int pid_max_roll = 400;                   //Maximum output of the PID-controller (+/-)
 
 float pid_p_gain_pitch = pid_p_gain_roll;  //Gain setting for the pitch P-controller.
@@ -77,7 +77,7 @@ float pid_i_mem_yaw, pid_yaw_setpoint, gyro_yaw_input, pid_output_yaw, pid_last_
 //============  Interrupt Control  ============//
 int start;
 
-void processSignal(int ch[4], int n)
+void processSignal(int n)
 {
   // the forward 9 numbers are  0, there is not filted
   if (channel_array[0][USED_NUM - 2] == 0)
@@ -102,14 +102,19 @@ void processSignal(int ch[4], int n)
       }
       sum -= maxnum; sum -= minnum;
       receiver_input_channel_filted[i] = sum / (USED_NUM - 2);
-      receiver_input_channel_filted[i] = constrain(receiver_input_channel_filted[i], 900, 2000);
+      receiver_input_channel_filted[i] = constrain(receiver_input_channel_filted[i], 160, 1800);
+      receiver_input_channel_filted[i] = float((receiver_input_channel_filted[i] - 160)) / 1640 * 1050 + 950;
     }
   }
 }
 
 void getChannelSignal()
 {
-  for (int i = 1; i <= 4; i++)receiver_input_channel[i - 1] = sbus.getChannel(i);
+  sbus.read(&receiver_input_channel[0] , &failSafe, &lostFrame);
+  //receiver_input_channel[0]=(receiver_input_channel[0]-150)/(1811-150)*1050+950;
+  //receiver_input_channel[1]=(receiver_input_channel[1]-150)/(1811-150)*1050+950;
+  //receiver_input_channel[2]=(receiver_input_channel[2]-150);
+  //receiver_input_channel[3]=(receiver_input_channel[3]-150)/(1811-150)*1050+950;
 }
 void printChannelSignal()
 {
@@ -125,13 +130,14 @@ void printChannelSignal()
   Serial.println(" ");
 }
 
-void checkSBUS()
+void updatechannels()
 {
-  if (sbus.signalLossActive())
-    Serial.print("SIGNAL_LOSS ");
 
-  if (sbus.failsafeActive())
-    Serial.print("FAILSAFE");
+  getChannelSignal();
+  processSignal(n);
+  n++;
+  if (n > (USED_NUM - 1))n -= USED_NUM;
+  //printChannelSignal();
 }
 
 void kamf()
@@ -145,11 +151,15 @@ void kamf()
   float accx = ax / AcceRatio;              //x轴加速度
   float accy = ay / AcceRatio;              //y轴加速度
   float accz = az / AcceRatio;              //z轴加速度
+  float gravity = sqrt(accx * accx + accy * accy + accz * accz);
+  //Serial.print(accz);Serial.print(" ");Serial.println(gravity);
 
   aax = atan(accy / accz) * (-180) / pi;    //y轴对于z轴的夹角
   aay = atan(accx / accz) * 180 / pi;       //x轴对于z轴的夹角
   aaz = atan(accz / accy) * 180 / pi;       //z轴对于y轴的夹角
 
+  Serial.print(aax); Serial.print(" "); Serial.print(aay); Serial.print(" ");
+  Serial.println(aaz);
   aax_sum = 0;                              // 对于加速度计原始数据的滑动加权滤波算法
   aay_sum = 0;
   aaz_sum = 0;
@@ -220,10 +230,10 @@ void kamf()
   Ry = Ry / 9;
   Rz = Rz / 9;
 
-  Px = Px + 0.0025;                         // 0.0025在下面有说明...
-  Kx = Px / (Px + Rx);                      //计算卡尔曼增益
+  Px = Px + 0.0025;                                // 0.0025在下面有说明...
+  Kx = Px / (Px + Rx);                            //计算卡尔曼增益
   agx = agx + Kx * (aax - agx);             //陀螺仪角度与加速度计速度叠加
-  Px = (1 - Kx) * Px;                       //更新p值
+  Px = (1 - Kx) * Px;                             //更新p值
 
   Py = Py + 0.0025;
   Ky = Py / (Py + Ry);
@@ -235,26 +245,11 @@ void kamf()
   agz = agz + Kz * (aaz - agz);
   Pz = (1 - Kz) * Pz;
 
+
+
+
   /* kalman end */
 }
-
-void updatechannels()
-{
-  if (!sbus.waitFrame(10))
-  {
-    //Serial.println("time out! ");
-  }
-  else
-  {
-    getChannelSignal();
-    processSignal(receiver_input_channel[4], n);
-    n++;
-    if (n > (USED_NUM - 1))n -= USED_NUM;
-    //printChannelSignal();
-    checkSBUS();
-  }
-}
-
 
 void lock_pwm() {
   esc_1 = 1050; esc_2 = 1050; esc_3 = 1050; esc_4 = 1050;
@@ -275,7 +270,7 @@ void lock_pwm() {
   }
 }
 
-bool generate_pwm(void *)
+void generate_pwm()
 {
   throttle = receiver_input_channel_filted[2];                                      //We need the throttle signal as a base signal.
   esc_1 = throttle - pid_output_pitch + pid_output_roll + pid_output_yaw; //Calculate the pulse for esc 1 (front-right - CCW)
@@ -306,125 +301,8 @@ bool generate_pwm(void *)
     if (esc_loop_timer >= timer_channel_4)PORTH &= B10111111;  //When the delay time is expired, digital port 9 is set low.
 
   }
-  return true;
 }
 
-void setup() {
-  //SBUS init
-  pinMode(6, OUTPUT); pinMode(7, OUTPUT); pinMode(8, OUTPUT); pinMode(9, OUTPUT); pinMode(LED_BUILTIN, OUTPUT);
-  Serial.begin(115200);
-  sbus.begin(SBUS_PIN, sbusBlocking);
-  // mpu6050 init
-  Wire.begin();
-  accelgyro.initialize();                 //初始化
-
-  unsigned short times = 200;             //采样次数
-  for (int i = 0; i < times; i++)
-  {
-    accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz); //读取六轴原始数值
-    axo += ax; ayo += ay; azo += az;      //采样和
-    gxo += gx; gyo += gy; gzo += gz;
-
-  }
-
-  axo /= times; ayo /= times; azo /= times; //计算加速度计偏移
-  gxo /= times; gyo /= times; gzo /= times; //计算陀螺仪偏移
-
-  digitalWrite(LED_BUILTIN, HIGH);
-  Serial.println("ready start! unlock the drone! ");
-
-
-
-    Serial.println(" start!  ");
-    start = 2;
-    zero_timer = micros();
-
-    pid_i_mem_roll = 0;
-    pid_last_roll_d_error = 0;
-    pid_i_mem_pitch = 0;
-    pid_last_pitch_d_error = 0;
-    pid_i_mem_yaw = 0;
-    pid_last_yaw_d_error = 0;
-
-    timer.every(20000, generate_pwm);
-  
-}
-
-
-void loop() {
-  timer.tick();
-
-  
-    //update the gyro data. this cost 10000 us
-
-    timer_1 = micros();
-
-    kamf();
-
-    gyro_roll_input = agx;
-    gyro_pitch_input = agy;
-    gyro_yaw_input = 0;
-
-    //update ESC data
-    if (sbus.waitFrame(9))
-    {
-      getChannelSignal();
-      processSignal(receiver_input_channel[4], n);
-      n++;
-      if (n > (USED_NUM - 1))n -= USED_NUM;
-      //printChannelSignal();
-      checkSBUS();
-    }
-
-    timer_2 = micros();
-    //Serial.println(timer_2 - timer_1);
-
-    pid_roll_setpoint = 0;
-    //We need a little dead band of 16us for better results.
-    if (receiver_input_channel_filted[1] > 1505)pid_roll_setpoint = (receiver_input_channel_filted[1] - 1505) / 3.0;
-    else if (receiver_input_channel_filted[1] < 1500)pid_roll_setpoint = (receiver_input_channel_filted[1] - 1500) / 3.0;
-
-    //The PID set point in degrees per second is determined by the pitch receiver input.
-    //In the case of deviding by 3 the max pitch rate is aprox 164 degrees per second ( (500-8)/3 = 164d/s ).
-    pid_pitch_setpoint = 0;
-    //We need a little dead band of 16us for better results.
-    if (receiver_input_channel_filted[0] > 1503)pid_pitch_setpoint = -(receiver_input_channel_filted[0] - 1503) / 3.0;
-    else if (receiver_input_channel_filted[0] < 1490)pid_pitch_setpoint = -(receiver_input_channel_filted[0] - 1490) / 3.0;
-
-    //The PID set point in degrees per second is determined by the yaw receiver input.
-    //In the case of deviding by 3 the max yaw rate is aprox 164 degrees per second ( (500-8)/3 = 164d/s ).
-    pid_yaw_setpoint = 0;
-    //We need a little dead band of 16us for better results.
-    if (receiver_input_channel_filted[2] > 1100) { //Do not yaw when turning off the motors.
-      if (receiver_input_channel_filted[3] > 1515)pid_yaw_setpoint = (receiver_input_channel_filted[3] - 1515) / 3.0;
-      else if (receiver_input_channel_filted[3] < 1505)pid_yaw_setpoint = (receiver_input_channel_filted[3] - 1505) / 3.0;
-    }
-    //Serial.print(esc_1); Serial.print("\t"); Serial.print(esc_2); Serial.print("\t"); Serial.print(esc_3); Serial.print("\t"); Serial.print(esc_4); Serial.println("\t");
-    
-    calculate_pid();
-    
-
-
-/*
-  timer_1 = micros();
-  if (sbus.waitFrame(9))
-  {
-    getChannelSignal();
-    processSignal(receiver_input_channel[4], n);
-    n++;
-    if (n > (USED_NUM - 1))n -= USED_NUM;
-    //printChannelSignal();
-    checkSBUS();
-  }
-  kamf();
-  timer_2 = micros();
-  Serial.println(timer_2 - timer_1);
-  */
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//Subroutine for calculating PID
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void calculate_pid() {
   //Roll calculations
   pid_error_temp = gyro_roll_input - pid_roll_setpoint;
@@ -456,3 +334,119 @@ void calculate_pid() {
 
   pid_last_yaw_d_error = pid_error_temp;
 }
+
+void setup() {
+  //SBUS init
+  pinMode(6, OUTPUT); pinMode(7, OUTPUT); pinMode(8, OUTPUT); pinMode(9, OUTPUT); pinMode(LED_BUILTIN, OUTPUT);
+  Serial.begin(115200);
+  sbus.begin();
+
+  // mpu6050 init
+  Wire.begin();
+  accelgyro.initialize();                 //初始化
+
+  unsigned short times = 200;             //采样次数
+  for (int i = 0; i < times; i++)
+  {
+    accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz); //读取六轴原始数值
+    axo += ax; ayo += ay; azo += az;      //采样和
+    gxo += gx; gyo += gy; gzo += gz;
+
+  }
+
+  axo /= times; ayo /= times; azo /= times; //计算加速度计偏移
+  gxo /= times; gyo /= times; gzo /= times; //计算陀螺仪偏移
+
+  for (int i = 0; i < times; i++)
+  {
+    kamf();
+    agxb += agx; agyb += agy; agzb += agz;
+    aaxb += aax; aayb += aay;
+  }
+  agxb /= times; agyb /= times; agzb /= times;
+  aaxb /= times; aayb /= times;
+
+  digitalWrite(LED_BUILTIN, HIGH);
+  Serial.println("ready start! unlock the drone! ");
+
+
+
+  Serial.println(" start!  ");
+  start = 2;
+  zero_timer = micros();
+
+  pid_i_mem_roll = 0;
+  pid_last_roll_d_error = 0;
+  pid_i_mem_pitch = 0;
+  pid_last_pitch_d_error = 0;
+  pid_i_mem_yaw = 0;
+  pid_last_yaw_d_error = 0;
+
+  zero_timer = micros();
+
+}
+
+
+void loop() {
+  //update the gyro data. this cost  us
+  timer_1 = micros();
+
+  kamf();
+
+  gyro_roll_input = agx - agxb;
+  gyro_pitch_input = agy - agyb;
+  gyro_yaw_input = 0;
+
+  //update ESC data
+  updatechannels();
+
+  pid_roll_setpoint = 0;
+  //We need a little dead band of 16us for better results.
+  if (receiver_input_channel_filted[1] > 1505)pid_roll_setpoint = (receiver_input_channel_filted[1] - 1495) / 4.0;
+  else if (receiver_input_channel_filted[1] < 1500)pid_roll_setpoint = (receiver_input_channel_filted[1] - 1475) / 4.0;
+
+  //The PID set point in degrees per second is determined by the pitch receiver input.
+  //In the case of deviding by 3 the max pitch rate is aprox 164 degrees per second ( (500-8)/3 = 164d/s ).
+  pid_pitch_setpoint = 0;
+  //We need a little dead band of 16us for better results.
+  if (receiver_input_channel_filted[0] > 1503)pid_pitch_setpoint = -(receiver_input_channel_filted[0] - 1495) / 4.0;
+  else if (receiver_input_channel_filted[0] < 1490)pid_pitch_setpoint = -(receiver_input_channel_filted[0] - 1465) / 4.0;
+
+  //The PID set point in degrees per second is determined by the yaw receiver input.
+  //In the case of deviding by 3 the max yaw rate is aprox 164 degrees per second ( (500-8)/3 = 164d/s ).
+  pid_yaw_setpoint = 0;
+  //We need a little dead band of 16us for better results.
+  if (receiver_input_channel_filted[2] > 1100) { //Do not yaw when turning off the motors.
+    if (receiver_input_channel_filted[3] > 1515)pid_yaw_setpoint = (receiver_input_channel_filted[3] - 1505) / 4.0;
+    else if (receiver_input_channel_filted[3] < 1505)pid_yaw_setpoint = (receiver_input_channel_filted[3] - 1475) / 4.0;
+  }
+  //Serial.print(gyro_roll_input); Serial.print("\t"); Serial.print(gyro_pitch_input); Serial.print("\t"); Serial.println(gyro_yaw_input);// Serial.print("\t"); Serial.println(esc_4);// Serial.println("\t");
+  //Serial.print(esc_1); Serial.print("\t"); Serial.print(esc_2); Serial.print("\t"); Serial.print(esc_3); Serial.print("\t"); Serial.println(esc_4);
+  //Serial.print(receiver_input_channel_filted[0]); Serial.print("\t"); Serial.print(receiver_input_channel_filted[1]);
+  //Serial.print("\t"); Serial.print(receiver_input_channel_filted[2]); Serial.print("\t"); Serial.println(receiver_input_channel_filted[3]);
+
+  calculate_pid();
+
+  //timer_2 = micros();Serial.println(timer_2 - timer_1);
+  generate_pwm();
+
+  /*
+    timer_1 = micros();
+    if (sbus.waitFrame(9))
+    {
+      getChannelSignal();
+      processSignal(receiver_input_channel[4], n);
+      n++;
+      if (n > (USED_NUM - 1))n -= USED_NUM;
+      //printChannelSignal();
+      checkSBUS();
+    }
+    kamf();
+    timer_2 = micros();
+    Serial.println(timer_2 - timer_1);
+  */
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Subroutine for calculating PID
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -5,7 +5,7 @@
 非常感谢:
 - Joop Brokkings的教程http://www.brokking.net/ymfc-32_auto_main.html
 - jjundot的kalman滤波https://github.com/jjundot/MPU6050_Kalman
-- fdivitto的SBUS解码程序https://github.com/fdivitto/sbus
+- fdivitto的SBUS解码程序https://github.com/bolderflight/SBUS.git
 - 代码还在完善，to be continue
 
 
